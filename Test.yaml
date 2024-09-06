@@ -1,0 +1,215 @@
+trigger: none
+
+# Define variable groups and pipeline-specific variables
+variables:
+- group: Conversion_OECM_Automation
+- group: OECM_Automation_AzureStorage
+- group: Environment_Codes
+- group: Wiki_URLs
+- name: varlocalpath
+  value: 'OECM Refresh Database/Powershell_scripts/Conversion_Scripts'
+
+resources:
+  repositories:
+  - repository: 'Wiki_Repository'
+    type: git
+    name: Ontario Student Information System Program Level Planning\Ontario-Student-Information-System.wiki
+
+# Define stages and jobs for the pipeline
+stages:
+- stage: DataBaseRefresh_QA
+  jobs:
+  - deployment: DataBaseRefresh_QA
+    timeoutInMinutes: 300
+    pool:
+      name: 'gwnp-win2024'
+    environment:
+      name: QA
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Checkout the code from the primary repository and the Wiki repository
+          - checkout: self
+            clean: true
+          - checkout: Wiki_Repository
+            clean: true
+
+          # Step to refresh requests to be looped
+          - task: PowerShell@2
+            displayName: 'Refresh Requests to be Looped'
+            name: mtrx  # Unique name for this task
+            inputs:
+              filePath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/Refresh_Requests_loop.ps1'
+              arguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(DB_Refresh_Query_ID)"'
+
+          # Step to configure variables
+          - task: PowerShell@2
+            displayName: 'Configuration Variables'
+            inputs:
+              filePath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/VariableConfig.ps1'
+              arguments: '"$(System.AccessToken)"'
+
+          # Fetch work items and update group variables
+          - task: PowerShell@2
+            displayName: 'Fetch Work Items and Update Group Variables'
+            inputs:
+              filePath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/Fetch_Workitem.ps1'
+              arguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(DB_Refresh_Query_ID)" "$(id)"'
+
+          # Update resource group and database server names in group variables
+          - task: PowerShell@2
+            displayName: 'Update RG, DB Server Names in Group Variables'
+            inputs:
+              filePath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/Update_RG_DB.ps1'
+              arguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)"'
+
+          # Validate the existence of a new database or tenant
+          - task: AzurePowerShell@5
+            displayName: 'Validate New DB/Tenant Existence'
+            condition: and(succeeded(), eq(variables['REQUEST_TYPE'], 'New DB'))
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/NewDB_Tenant_Validation.ps1'
+              ScriptArguments: '"$(System.AccessToken)" "$(Group_Id)"'
+              azurePowerShellVersion: 'LatestVersion'
+
+          # Compare target and source database versions
+          - task: AzurePowerShell@5
+            displayName: 'Compare Target and Source Database Versions'
+            condition: and(succeeded(), eq(variables['RefreshType'], 'Refresh'))
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/DB_Version_Check.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(QA_DatabasePassword)"'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Capture roles and permissions from the target database
+          - task: AzurePowerShell@5
+            displayName: 'Capture Roles and Permissions from Target DB'
+            condition: and(succeeded(), eq(variables['RefreshType'], 'Refresh'), ne(variables['REQUEST_TARGET_ENV'], 'QA'))
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Common_Scripts/Capture_Roles_Permissions.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(id)"'
+              azurePowerShellVersion: 'LatestVersion'
+
+          # Cleanup stored procedures before database refresh
+          - task: AzurePowerShell@5
+            displayName: 'Stored Procedure Cleanup Before DB Refresh'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/DB_Stored_Procedure_Cleanup_Before_DB_Refresh.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)"'
+              azurePowerShellVersion: 'LatestVersion'
+
+          # Export the database as a bacpac file
+          - task: AzurePowerShell@5
+            displayName: 'Export Bacpac File'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/DB_Export_Bacpac.ps1'
+              ScriptArguments: '"$(System.AccessToken)"'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Import the bacpac file in the QA environment
+          - task: AzurePowerShell@5
+            displayName: 'Import Bacpac File in QA Environment'
+            condition: and(succeeded(), eq(variables['REQUEST_TARGET_ENV'], 'QA'))
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/$(varlocalpath)/DB_Import_Bacpac.ps1'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Import the bacpac file in non-QA environments
+          - task: SqlAzureDacpacDeployment@1
+            displayName: 'Import Bacpac File in Non-Conversion Environment'
+            condition: and(succeeded(), ne(variables['REQUEST_TARGET_ENV'], 'QA'))
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              AuthenticationType: 'usernameAndPassword'
+              username: $(QA_DatabaseUserName)
+              password: $(QA_DatabasePassword)
+              DeploymentAction: 'Import'
+              bacpacFile: '$(REQUEST_BACPAC_FILE)'
+
+          # Validate TempDB visibility at the frontend
+          - task: AzurePowerShell@5
+            displayName: 'TempDB Visibility at Frontend Validation'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Common_Scripts/Validate_TempDB_Creation_Ubuntu.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(RefreshType)" "$(id)" "$(QA_DatabasePassword)"'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Perform post-refresh steps on TempDB
+          - task: AzurePowerShell@5
+            displayName: 'Perform Post Refresh Steps on TempDB'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Common_Scripts/Perform_Post_Refresh_Steps_on_TempDB_Ubuntu.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(RefreshType)" "$(id)" "$(QA_DatabasePassword)"'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Execute new tenant post-refresh scripts only for QA
+          - task: AzurePowerShell@5
+            displayName: 'New Tenant Post Refresh Scripts Only QA'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Common_Scripts/New_Tenant_Post_Refresh_Scripts_Only_QA_Ubuntu.ps1'
+              ScriptArguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(RefreshType)" "$(id)" "$(QA_DatabasePassword)"'
+              azurePowerShellVersion: 'LatestVersion'
+            env:
+              QA_DATABASE_PASSWORD: $(QA_DatabasePassword)
+
+          # Update work item status to 'Pending Wildfly Restart'
+          - task: PowerShell@2
+            displayName: 'Update the Work Item Status - Pending Wildfly Restart'
+            inputs:
+              filePath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Non_Conversion_Scripts/Update_workItem_Status.ps1'
+              arguments: '"$(Organization)" "$(Project)" "$(Group_Id)" "$(System.AccessToken)" "$(id)"'
+
+          # Install the AzTable module if it's not already installed
+          - task: AzurePowerShell@5
+            displayName: 'Install AzTable Module'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              azurePowerShellVersion: 'LatestVersion'
+              ScriptType: inlineScript
+              inline: |
+                # Check if the AzTable module is installed, if not, install it
+                If (!(Get-Command Get-AzTableRow -ErrorAction Ignore)) {
+                  Write-Host "AzTable module is not installed. Installing now..."
+                  Install-Module AzTable -Force
+                } Else {
+                  Write-Host "AzTable module already installed"
+                }
+
+          # Update the Wiki with relevant information
+          - task: AzurePowerShell@5
+            displayName: 'Update Wiki'
+            inputs:
+              azureSubscription: 'autorefresh-service-connection'
+              azurePowerShellVersion: 'LatestVersion'
+              ScriptType: 'FilePath'
+              ScriptPath: '$(System.DefaultWorkingDirectory)/OECM Refresh Database/Powershell_scripts/Common_Scripts/WikiUpdate.ps1'
+              ScriptArguments: '-SystemToken "$(System.AccessToken)" -RefreshReqNumber "$(id)" -Organization "$(Organization)" -Project "$(Project)"'
