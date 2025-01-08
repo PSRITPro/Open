@@ -1,4 +1,5 @@
-﻿$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+﻿Set-Location $PSScriptRoot
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $TransScriptFile = "TransScript_$($timestamp).log"
 Start-Transcript $TransScriptFile
 
@@ -6,32 +7,11 @@ Start-Transcript $TransScriptFile
 $siteUrl = "https://myorg.sharepoint.com/"
 Connect-PnPOnline -Url $siteUrl -UseWebLogin
 
+$fileVersionsDetails = "file_versions_report_$($timestamp).csv"
 # Set the document library name
 $libraryName = "Documents"  # Replace with your document library name
-
-$BatchSize = 500  # Define the batch size
-$VersionsToKeep = 51
-
-# Create the CAML query
-$CamlQuery = @"
-<View Scope='RecursiveAll'>
-  <Query>
-    <Where>
-      <Eq>
-        <FieldRef Name='FSObjType' />
-        <Value Type='Integer'>0</Value>
-      </Eq>
-    </Where>
-  </Query>
-  <RowLimit Paged='TRUE'>$BatchSize</RowLimit>
-</View>
-"@
-
-$fileVersionsDetails = "file_versions_report_$($timestamp).csv"
-$listItemsDetails = "ListItems_$($timestamp) .csv"
-
-Get-PnPListItem -List $LibraryName -Query $CamlQuery | Select ID | Export-Csv -Path $listItemsDetails -NoTypeInformation
-$ListItems = Import-Csv -Path $listItemsDetails   
+$itemsCsv = Get-ChildItem -Filter "*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$ListItems = Import-Csv -Path $itemsCsv.FullName 
 foreach ($Item in $ListItems) {
         try{
             $listItem = Get-PnPListItem -List $LibraryName -Id $Item.Id -ErrorAction Stop
