@@ -4,7 +4,7 @@ $TransScriptFile = "TransScript_$($timestamp).log"
 Start-Transcript $TransScriptFile
 
 # Define parameters
-$siteUrl = "https://ksrconsultingservices.sharepoint.com/"
+$siteUrl = "https://myorg.sharepoint.com/"
 Connect-PnPOnline -Url $siteUrl -UseWebLogin
 $VersionsToKeep = 1
 # Set the document library name
