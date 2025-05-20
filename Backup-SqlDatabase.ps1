@@ -1,4 +1,4 @@
-﻿#Restoring a SQL Server database from a backup file when the destination paths for the data and log files are different from the original paths in the backup requires the use of the WITH MOVE option. Here's a PowerShell script to automate this process:
+﻿#Backup a SQL Server database
 # Set location path
 $scriptDirectory = $PSScriptRoot
 Set-Location -Path $scriptDirectory
