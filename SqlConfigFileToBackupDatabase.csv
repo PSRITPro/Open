@@ -1,2 +1,2 @@
-BackupDBServerInstance,BackupDBServerInstancePort,BackupDatabaseName
-DESKTOP-KA45I83\SQLEXPRESS,,AdventureWorks2019
+BackupDBServerInstance,BackupDBServerInstancePort,BackupDatabaseName,BackUpFileLocation
+DESKTOP-KA45I83\SQLEXPRESS,,AdventureWorks2019,E:\GitHub\psritpro\my-dev-journal\powershell\sql

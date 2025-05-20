@@ -23,14 +23,15 @@ Try {
         $sqlFiles = Import-Csv -Path $inputFile.FullName
         ForEach($sql in $sqlFiles)
         {
-            If($sql.Port){
-                $SqlDBServerInstance = "$($sql.RestoreDBServerInstance),$($Sql.Port)"
+            If($sql.BackupDBServerInstancePort){
+                $SqlDBServerInstance = "$($sql.BackupDBServerInstance),$($Sql.BackupDBServerInstancePort)"
             }
             Else{
-                $SqlDBServerInstance = $sql.RestoreDBServerInstance
+                $SqlDBServerInstance = $sql.BackupDBServerInstance
             }
-            $destinationDatabaseName = $sql.RestoreDatabaseName
-            $backupFilePath = "$($scriptDirectory)\$($destinationDatabaseName)_$($timestamp).bak"
+            $backupDatabaseName = $sql.BackupDatabaseName
+            #$backupFilePath = "$($scriptDirectory)\$($destinationDatabaseName)_$($timestamp).bak"
+            $backupFilePath = "$($sql.BackUpFileLocation)\$($backupDatabaseName)_$($timestamp).bak"
 
             ## Read the content of the SQL template file
             $sqlDatabaseBackupQuery = Get-Content -Path $sqlDatabaseBackupTemplateFilePath -Raw
@@ -38,13 +39,13 @@ Try {
                                                              -replace "{BackupFilePath}", $backupFilePath
             Try{
                 #Execute the RESTORE DATABASE command
-                Invoke-Sqlcmd -ServerInstance $sqlServerInstance -Query $sqlDatabaseBackupQuery -Verbose -ErrorAction Stop              
+                Invoke-Sqlcmd -ServerInstance $SqlDBServerInstance -Query $sqlDatabaseBackupQuery -Verbose -ErrorAction Stop              
             }
             Catch{
-                Write-Host "Database [$destinationDatabaseName] restored failed to [$sqlServerInstance] - $_" -ForegroundColor Red
+                Write-Host "Database [$backupDatabaseName] restored failed to [$sqlServerInstance] - $_" -ForegroundColor Red
             }
 
-            Write-Host "Database [$destinationDatabaseName] restored successfully to $sqlServerInstance."
+            Write-Host "Database [$backupDatabaseName] restored successfully to $sqlServerInstance."
         }
     }
 }

@@ -7,7 +7,7 @@ WITH FORMAT, -- Initializes the backup media
     NOUNLOAD, -- Keeps the tape in the drive
     STATS = 10, -- Displays progress every 10%
     CHECKSUM, -- Verifies data integrity during the backup process
-    COMPRESSION; -- Compresses the backup file
+    MaxTransferSize = 1048576;
 GO
 
 --BACKUP DATABASE [{{DatabaseName}}]
