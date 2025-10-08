@@ -1,1 +1,60 @@
-..
+# Connect to Microsoft Graph with proper permissions
+Connect-MgGraph -Scopes "Sites.Read.All", "Files.Read.All"
+
+# Define your SharePoint site and library
+$siteUrl = "https://contoso.sharepoint.com/sites/ProjectX"
+$libraryPath = "Shared Documents/FormsData"   # folder where XMLs are stored
+$downloadFolder = "C:\Temp\XMLAttachments"
+
+# Create local folder if not exists
+If (!(Test-Path $downloadFolder)) { New-Item -ItemType Directory -Path $downloadFolder | Out-Null }
+
+# Get Site and Drive info
+$site = Get-MgSite -SiteId $siteUrl
+$drive = Get-MgSiteDrive -SiteId $site.Id
+
+# List all XML files in the folder
+$items = Get-MgDriveItemChildren -DriveId $drive.Id -ItemPath $libraryPath | Where-Object { $_.Name -like "*.xml" }
+
+foreach ($item in $items) {
+    Write-Host "Processing $($item.Name)..."
+
+    # Download XML file content
+    $contentStream = Get-MgDriveItemContent -DriveId $drive.Id -DriveItemId $item.Id
+    $xmlText = (New-Object System.IO.StreamReader($contentStream)).ReadToEnd()
+
+    # Parse XML
+    [xml]$formXml = $xmlText
+
+    # Namespace handling (InfoPath uses namespaces like my:)
+    $nsmgr = New-Object System.Xml.XmlNamespaceManager($formXml.NameTable)
+    $nsmgr.AddNamespace("my", $formXml.DocumentElement.NamespaceURI)
+
+    # Get all attachment nodes
+    $attachmentNodes = $formXml.SelectNodes("//my:Attachment", $nsmgr)
+
+    if ($attachmentNodes.Count -eq 0) {
+        Write-Host "  No attachments found in $($item.Name)"
+        continue
+    }
+
+    $fileIndex = 1
+    foreach ($node in $attachmentNodes) {
+        # Attachment structure: filename and base64 blob
+        $binaryData = [Convert]::FromBase64String($node.InnerText)
+
+        # Optional: extract filename from sibling node (if exists)
+        $fileNameNode = $node.SelectSingleNode("../my:FileName", $nsmgr)
+        if ($fileNameNode) {
+            $fileName = $fileNameNode.InnerText
+        } else {
+            $fileName = "$($item.Name)_Attachment$fileIndex.bin"
+        }
+
+        $outputFile = Join-Path $downloadFolder $fileName
+        [IO.File]::WriteAllBytes($outputFile, $binaryData)
+
+        Write-Host "  Saved: $outputFile"
+        $fileIndex++
+    }
+}
