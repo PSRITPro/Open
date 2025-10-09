@@ -1,0 +1,192 @@
+# =========================================
+# Configuration
+# =========================================
+$SiteUrl       = "https://yourtenant.sharepoint.com/sites/YourSite"
+$LibraryName   = "FormLibrary"
+$DownloadRoot  = Join-Path $PSScriptRoot "CustomFolder"
+$LogFolder     = Join-Path $DownloadRoot "Logs"
+$TranscriptLog = Join-Path $LogFolder "Transcript_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$ErrorLog      = Join-Path $LogFolder "Error_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$BatchSize     = 500
+
+# Ensure directories exist
+New-Item -Path $DownloadRoot -ItemType Directory -Force | Out-Null
+New-Item -Path $LogFolder -ItemType Directory -Force | Out-Null
+
+# Start transcript
+Start-Transcript -Path $TranscriptLog -Append
+
+# -----------------------------------------
+# Logging function
+# -----------------------------------------
+function Log-Error {
+    param([string]$Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $msg = "[$timestamp] ERROR: $Message"
+    Write-Host $msg -ForegroundColor Red
+    Add-Content -Path $ErrorLog -Value $msg
+}
+
+# -----------------------------------------
+# Connect to SharePoint
+# -----------------------------------------
+try {
+    Connect-PnPOnline -Url $SiteUrl -Interactive
+    Write-Host "Connected to SharePoint" -ForegroundColor Green
+} catch {
+    Log-Error "Failed to connect: $($_.Exception.Message)"
+    Stop-Transcript
+    exit
+}
+
+# -----------------------------------------
+# Recursive file retrieval
+# -----------------------------------------
+function Get-AllXmlFiles {
+    param(
+        [string]$ListName,
+        [string]$FolderUrl
+    )
+
+    $files = @()
+
+    try {
+        $listItems = Get-PnPListItem -List $ListName -FolderServerRelativeUrl $FolderUrl `
+            -PageSize $BatchSize -Fields "FileRef","FileLeafRef","FSObjType" -ScriptBlock { param($items) $items }
+
+        foreach ($item in $listItems) {
+            if ($item.FileSystemObjectType -eq "File" -and $item["FileLeafRef"] -like "*.xml") {
+                $files += $item
+            }
+        }
+
+        # Recursive for subfolders
+        $subFolders = Get-PnPFolder -FolderSiteRelativeUrl $FolderUrl -ErrorAction SilentlyContinue
+        foreach ($sub in $subFolders.Folders) {
+            $files += Get-AllXmlFiles -ListName $ListName -FolderUrl $sub.ServerRelativeUrl
+        }
+
+    } catch {
+        Log-Error "Error retrieving items in $FolderUrl: $($_.Exception.Message)"
+    }
+
+    return $files
+}
+
+# -----------------------------------------
+# Process XMLs and attachments
+# -----------------------------------------
+function Process-XmlFiles {
+    param([array]$Files)
+
+    $totalFiles = $Files.Count
+    $fileIndex = 0
+
+    foreach ($item in $Files) {
+        $fileIndex++
+        $progressPercent = [math]::Round(($fileIndex / $totalFiles) * 100)
+        Write-Progress -Activity "Processing XML Files" -Status "$fileIndex of $totalFiles: $($item['FileLeafRef'])" -PercentComplete $progressPercent
+
+        try {
+            $fileUrl  = $item["FileRef"]
+            $fileName = $item["FileLeafRef"]
+
+            # Compute folder path in explorer
+            $relativePath = $fileUrl.Replace("/sites/YourSite/$LibraryName", "").Trim("/")
+            $parentPath   = Split-Path $relativePath -Parent
+
+            # If XML is directly in library
+            if ([string]::IsNullOrEmpty($parentPath)) {
+                $xmlFolder = Join-Path $DownloadRoot ([IO.Path]::GetFileNameWithoutExtension($fileName))
+            } else {
+                $xmlFolder = Join-Path $DownloadRoot $parentPath
+                $xmlFolder = Join-Path $xmlFolder ([IO.Path]::GetFileNameWithoutExtension($fileName))
+            }
+
+            $attachFolder = Join-Path $xmlFolder "Attachments"
+
+            # Skip if XML already downloaded
+            $localXmlPath = Join-Path $xmlFolder $fileName
+            if (Test-Path $localXmlPath) {
+                Write-Host "Skipping already downloaded XML: $fileName" -ForegroundColor DarkYellow
+                continue
+            }
+
+            # Create folders
+            New-Item -Path $xmlFolder -ItemType Directory -Force | Out-Null
+            New-Item -Path $attachFolder -ItemType Directory -Force | Out-Null
+
+            # Download XML
+            Get-PnPFile -Url $fileUrl -Path $xmlFolder -FileName $fileName -AsFile -Force -ErrorAction Stop
+            Write-Host "`nProcessing XML: $fileName" -ForegroundColor Cyan
+
+            # Parse XML
+            [xml]$xmlDoc = Get-Content -Path $localXmlPath -Raw
+            $leafNodes = Select-Xml -Xml $xmlDoc -XPath "//*[not(*)]/text()"
+            $totalAttachments = $leafNodes.Count
+            $attachIndex = 0
+
+            foreach ($node in $leafNodes) {
+                $attachIndex++
+                $attachPercent = if ($totalAttachments -gt 0) { [math]::Round(($attachIndex / $totalAttachments) * 100) } else { 0 }
+                Write-Progress -Activity "Processing Attachments" -Status "XML: $fileName - Attachment $attachIndex of $totalAttachments" -PercentComplete $attachPercent
+
+                $value = $node.Node.Value
+                if ($value -match '^[A-Za-z0-9+/=]{100,}$') {
+                    try {
+                        $bytes = [Convert]::FromBase64String($value)
+                        $memStream = New-Object System.IO.MemoryStream(, $bytes)
+                        $reader = New-Object System.IO.BinaryReader($memStream)
+
+                        $reader.ReadBytes(16) | Out-Null
+                        $size = [int]$reader.ReadUInt32()
+                        $nameLen = [int]$reader.ReadUInt32()
+                        $nameBytes = $reader.ReadBytes($nameLen)
+                        $attachName = [System.Text.Encoding]::Unicode.GetString($nameBytes, 0, $nameLen - 2)
+                        $content = $reader.ReadBytes($size)
+
+                        $attachPath = Join-Path $attachFolder $attachName
+
+                        if (Test-Path $attachPath) {
+                            Write-Host "Skipping existing attachment: $attachName" -ForegroundColor DarkYellow
+                            continue
+                        }
+
+                        [IO.File]::WriteAllBytes($attachPath, $content)
+                        Write-Host "Saved attachment: $attachName" -ForegroundColor Green
+                    } catch {
+                        Log-Error "Attachment decode failed for $fileName: $($_.Exception.Message)"
+                    }
+                }
+            }
+
+        } catch {
+            Log-Error "Error processing file '$($item['FileLeafRef'])': $($_.Exception.Message)"
+        }
+    }
+
+    # Clear progress bar at end
+    Write-Progress -Activity "Processing XML Files" -Completed
+    Write-Progress -Activity "Processing Attachments" -Completed
+}
+
+# -----------------------------------------
+# Main Execution
+# -----------------------------------------
+try {
+    $allFiles = Get-AllXmlFiles -ListName $LibraryName -FolderUrl $LibraryName
+    Write-Host "`nTotal XML files found: $($allFiles.Count)" -ForegroundColor Green
+
+    if ($allFiles.Count -gt 0) {
+        Process-XmlFiles -Files $allFiles
+    } else {
+        Write-Host "No XML files found in library." -ForegroundColor Red
+    }
+}
+catch {
+    Log-Error "Script execution failed: $($_.Exception.Message)"
+}
+
+Stop-Transcript
+Write-Host "`nProcessing complete! Transcript: $TranscriptLog" -ForegroundColor Yellow
+Write-Host "Error log: $ErrorLog" -ForegroundColor Red
